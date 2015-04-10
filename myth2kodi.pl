@@ -20,7 +20,9 @@
 #       cpan App:cpanminus  # for cpanm
 #       cpanm Tie::Handle::CSV
 #
-#   Also, handbrake must be installed, with x264 support
+#   Also, handbrake must be installed, with x264 support, and/or ffmpeg
+#   with x264 support.  Mediainfo is required for interlace detection, unless
+#   you want to use the slower ffmpeg method.
 
 use WWW::Mechanize;
 use JSON -support_by_pp;
@@ -31,6 +33,7 @@ use Text::Wrap qw(wrap $columns $huge);
 use Term::ANSIColor qw(:constants);
 use Getopt::Std;
 use Config::Simple;
+use Term::ReadKey;
 use sigtrap qw(handler progress_print USR1);
 
 $Text::Wrap::columns = 72;
@@ -88,6 +91,9 @@ my $config_file = $config_dir . "/" . "myth2kodi.ini";
 # -u: get upcoming list only, implies -t
 # -o: only search for files store in directory 'dir'
 # -S: use SSH to fetch comskip data (0 localhost, 1 ssh)
+# -x: overwrite existing files, and ignore done markers
+# -E: choose encoder (ffmpeg, or HandbrakeCLI)
+# -w: max width of video
 
 my $very_dry_run = 0;
 my $dry_run = 0;
@@ -103,13 +109,16 @@ my $upcoming=0;
 my $delete_rec=0;
 my $use_ssh=0;
 my $myth_version;
+my $overwrite=0;
+my $max_width=-1;
+my $encoder="HandbrakeCLI";
 my $x264_profile            = $X264_PROFILE;
 my $x264_interlaced_preset  = $X264_INTERLACED_PRESET;
 my $x264_progressive_preset = $X264_PROGRESSIVE_PRESET;
 my $handbrake_audio_opts    = $HANDBRAKE_AUDIO_OPTS;
 my $handbrake_other_opts    = $HANDBRAKE_OTHER_OPTS;
 
-getopts("bdmieutsS:Rn:f:M:o:c:a:", \%options);
+getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:", \%options);
 
 if (defined($options{m}) && defined($options{d})) {
     die "Mutually exclusive options specified\n";
@@ -138,6 +147,7 @@ $myth_version           = $config{"myth-server.ver"};
 $use_ssh                = $config{"myth-server.use_ssh"};
 
 $ENCODE                 = $config{"encode.script_path"} . "/" . $config{"encode.script"};
+$encoder                = $config{"encode.encoder"};
 
 # x264 options
 $x264_profile           = $config{"x264.profile"};
@@ -155,6 +165,14 @@ if (defined($options{S})) {
     }
 }
 
+
+if (defined($options{E})) {
+    $encoder = $options{E};
+}
+
+if (defined($options{w})) {
+    $max_width = $options{w};
+}
 
 if (defined($options{f})) {
     $csv_file = $options{f};
@@ -182,6 +200,10 @@ if (defined($options{p})) {
 
 if (defined($options{i})) {
     $interactive=1;
+}
+
+if (defined($options{x})) {
+    $overwrite=1;
 }
 
 if (defined($options{u})) {
@@ -234,46 +256,15 @@ my $curr_index=1;
 # We read shows in either by CSV file, or by the Myth Services API
 if ($csv_file) {
     ($shows_ref, $gi_ref) = parse_csv_file($csv_file, $name);
-    %shows = %{ $shows_ref };
-    %gi = %{ $gi_ref };
 } elsif ($myth_server) {
     ($shows_ref, $gi_ref) = fetch_myth_recordings_list($myth_host, $myth_port, $name, $upcoming);
-    %shows = %{ $shows_ref };
-    %gi = %{ $gi_ref };
 }
 
+%shows = %{ $shows_ref };
+%gi = %{ $gi_ref };
 
-#------------------------------------------------------------------------------
-# If we are in interactive mode, prompt
-# the user for what shows / episodes to encode
-my %scan;
+
 my $to_encode=0;
-if ($interactive) {
-    my $show;
-    print "Interactive mode\n";
-    foreach $show (keys %shows) {
-   
-        my @opts = ('y','A','n','N');
-        my $r = prompt("Import episodes from", $show, \@opts , 'n');
-
-        if ($$r eq 'N') {
-            last;
-        }
-        for (my $idx = 0; $idx < $gi{$show} && $$r ne "n"; $idx++) {
-            my $resp;
-            if ($$r eq "y") {
-                @opts = ('Y', 'n');
-                $resp = prompt("\t$shows{$show}{title}[$idx] ($shows{$show}{airdate}[$idx])", "", \@opts, 'Y');
-            }
-            if (($$r eq "A") || (lc($$resp) eq lc("Y"))) {
-                $scan{$show} = 1;
-                $shows{$show}{encode}[$idx] = 1;
-            }
-        }
-    }
-}
-
-
 #------------------------------------------------------------------------------
 # For all the shows we are going to import, verify that we can locate each one
 # in the directories specified in the config file src_dirs.
@@ -285,10 +276,6 @@ my $sub_idx;
 # hash list
 foreach $show (keys %shows) {
     for (my $idx = 0; $idx < $gi{$show}; $idx++) {
-
-        # This just skips looking for shows we didn't select
-        # if in interactive mode.
-        next if ($interactive && ($scan{$show} != 1));
 
         # If we are just listing upcoming shows, then
         # 'mark' them all as present.  The files for shows
@@ -332,15 +319,11 @@ foreach $show (keys %shows) {
         } else {
             print GREEN, "found!\r", RESET;
             $shows{$show}{valid}[$idx] = 1;
-            if (!$interactive) {
-                $shows{$show}{encode}[$idx] = 1;
-                $to_encode++;
-            } elsif ($shows{$show}{encode}[$idx]) {
-                $to_encode++;
-            }
             $sub_idx{$show}[$i{$show}] = $idx;
-            $total_shows++;
             $i{$show}++;
+            if (!$interactive) {
+                queue_show($show, $idx);
+            }
         }
     }
 }
@@ -348,6 +331,48 @@ foreach $show (keys %shows) {
 print "\e[K";
 print "Scanned $scan_cnt files, found $total_shows, missing $missing_cnt\n";
 
+
+#------------------------------------------------------------------------------
+# If we are in interactive mode, prompt
+# the user for what shows / episodes to encode
+if ($interactive) {
+    my $show;
+    my $prompt_txt;
+    print "Interactive mode\n";
+    foreach $show (keys %shows) {
+        my @opts = ('y','A','n','N');
+        my $r = prompt("Import episodes from", $show, \@opts , 'n');
+        print "\n";
+
+        if ($$r eq 'N') {
+            last;
+        }
+        for (my $idx = 0; $idx < $gi{$show} && $$r ne "n"; $idx++) {
+            my $resp;
+            $prompt_txt = sprintf("\t%s %-25.25s %-1s",($shows{$show}{airdate}[$idx]), $shows{$show}{title}[$idx], "");
+            if ($$r eq "y") {
+                @opts = ('y', 'n', 'p');
+                my $action = 0;
+                while ($action == 0) {
+                    $resp = prompt("$prompt_txt", "", \@opts, 'y');
+                    if ($$resp eq "p") {
+                        # do preview
+                        print "\nPreviewing $shows{$show}{title}[$idx]\n";
+                        `vlc "$shows{$show}{fullname}[$idx]" 2>&1 >/dev/null`;
+                    } else {
+                        $action = 1;
+                    }
+                }
+            }
+            if (($$r eq "A") || (lc($$resp) eq lc("Y"))) {
+#                print "$show - $idx\n";
+                print CYAN, "\r+$prompt_txt", RESET;
+                queue_show($show, $idx);
+           }
+           print "\n";
+        }
+    }
+}
 
 #------------------------------------------------------------------------------
 # Now loop through for each show we are going to encode,
@@ -438,12 +463,23 @@ foreach $show (keys %shows) {
                                                                             $num_entries);
 
 
-        if (-e "$status_name") {
+        if (-e "$status_name" && !$overwrite) {
             #print CYAN, "[$curr_index/$total_shows, $shows_parsed/$num_entries]", RESET,
             print CYAN, "$indices_str", RESET,
                   BOLD, YELLOW, "\tDone marker exists, skipping \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
         } else {
             my $action = "Encoding";
+
+            if (-e "$newname") {
+                my $newname_bak = "$newname" . ".bak";
+                my $num = 1;
+                while (-e "$newname_bak") {
+                    $newname_bak = "$newname" . ".bak" . "$num";
+                    $num++;
+                }
+                print RED, "moving original to $newname_bak\n" if (!$title_only);
+                `mv "$newname" "$newname_bak"`;
+            }
 
             if ($meta_only) {
                 $action  = "Write metadata";
@@ -476,21 +512,41 @@ foreach $show (keys %shows) {
             $recinfo{starttime} = $shows{$show}{start}[$j];
             $recinfo{use_ssh}   = $use_ssh;
         
-            if (-e "$comskip_name") {
+            if (-e "$comskip_name" && !$overwrite) {
                 print BOLD, YELLOW, "Comskip file exists, not overwriting\n", RESET if (!$very_dry_run);
             } else {
                 my $comskip = fetch_comskip(%recinfo) if (!$title_only);
                 if (!$dry_run && !$very_dry_run) {
+                    if (-e "$comskip_name") {
+                        my $comskip_bak = "$comskip_name" . ".bak";
+                        my $num = 1;
+                        while (-e "$comskip_bak") {
+                            $comskip_bak = "$comskip_name" . ".bak" . "$num";
+                            $num++;
+                        }
+                        `mv "$comskip_name" "$comskip_bak"`;
+                    }
+
                     open(my $fh, '>', "$comskip_name") or die "Could not open file '$comskip_name' $!";
                     print $fh "${$comskip}";
                     close $fh;
                 }
             }
 
-            if (-e "$info_name") {
+            if (-e "$info_name" && !$overwrite) {
                 print BOLD, YELLOW, "Info file exists, not overwriting\n", RESET if (!$very_dry_run);
             } else {
                 if (!$dry_run && !$very_dry_run) {
+                    if (-e "$info_name") {
+                        my $info_name_bak = "$info_name" . ".bak";
+                        my $num = 1;
+                        while (-e "$info_name_bak") {
+                            $info_name_bak = "$info_name" . ".bak" . "$num";
+                            $num++;
+                        }
+                        `mv "$info_name" "$info_name_bak"`;
+                    }
+
                     # This could really be optional, it isn't used by xbmc/kodi.  But it might be nice
                     # to have some simple metadata in a human-readable format, when manually browsing via
                     # a shell.
@@ -512,9 +568,10 @@ foreach $show (keys %shows) {
             my $start_time = time();
             print BRIGHT_WHITE, ON_BLACK;
 
-            my $run_dry = "dry-run" if ($dry_run || $meta_only);
+            my $run_dry = "-1";
+            $run_dry = "dry-run" if ($dry_run || $meta_only);
             $ret = system("unbuffer nice -n 18 \"$ENCODE\" \"$filename\" \"$newname\" \\
-                          ${$interlaced} $x264_preset \"$error_log\" $run_dry") if (!$title_only && !$meta_only);
+                          ${$interlaced} $x264_preset \"$error_log\" $run_dry $max_width $encoder") if (!$title_only && !$meta_only);
             print "  ", RESET;
 
             if ($ret != 0) {
@@ -550,6 +607,22 @@ foreach $show (keys %shows) {
     }
 }
 
+#------------------------------------------------------------------------------
+# Determine if the video file to encode is interlaced or not.
+#
+sub detect_interlaced
+{
+    my ($filename) = @_;
+    my $interlaced = "progressive";
+
+    print "Interlace detection... ";
+
+    $interlaced = lc(`mediainfo --Inform="Video;%ScanType%" "$filename"`);
+    chomp $interlaced;
+    print BOLD, "$interlaced video\n", RESET;
+    return (\$interlaced);
+}
+
 
 #------------------------------------------------------------------------------
 # Determine if the video file to encode is interlaced or not.
@@ -560,10 +633,13 @@ foreach $show (keys %shows) {
 #
 # This currently relies on ffmpeg.  Maybe we should do like encode, and just
 # pass this off to a separate script.
-sub detect_interlaced
+#
+# Update: deprecate the ffmpeg method, perhaps fall back to this if
+#         mediainfo is not installed.
+sub detect_interlaced_ffmpeg
 {
     my ($filename) = @_;
-    my $frame_cnt = 1000;
+    my $frame_cnt = 2000;
     my $interlaced = "progressive";
 
     print "Interlace detection... ";
@@ -578,7 +654,7 @@ sub detect_interlaced
 
     # Somewhat arbitrary - we are looking for a preponderance of TFF and BFF frames.
     # This score cutoff we determine empiracly from a sample of ~700 files recorded OTA.
-    if ($score > $frame_cnt / 1.5) {
+    if ($score > $frame_cnt / 1.1) {
         $interlaced = "interlaced";
         print BOLD, "interlaced video\n", RESET;
     } else {
@@ -622,7 +698,7 @@ sub fetch_comskip
     }
 
     if ($recinfo{use_ssh} == 1) {
-        $raw = `ssh $myth_ssh_key $myth_ssh_user\@$myth_host "$cmd"`;
+        $raw = `ssh $myth_ssh_key $myth_ssh_user\@$myth_host "$cmd" 2>/dev/null`;
     } else {
         $raw = `$cmd`;
     }
@@ -876,14 +952,31 @@ sub prompt
 
     my $opt_txt = join('/', @{ $opts });
 
+    ReadMode('cbreak');
+    print "$txt ", BOLD, "$btxt", RESET, " [$opt_txt] ($default)? ";
     while ($o{$r} != 1) {
-        print "$txt ", BOLD, "$btxt", RESET, " [$opt_txt] ($default)? ";
-        $| = 1; $r = <STDIN>; chomp $r;
+        while (not defined ($r = ReadKey(-1))) {
+        }
+#        $| = 1; $r = <STDIN>; chomp $r;
         if ($r eq "") {
             $r = $default;
         }
     }
+    print "$r";
+    ReadMode('restore');
     return (\$r);
+}
+
+
+#------------------------------------------------------------------------------
+# Queue a show for transcoding
+sub queue_show
+{
+    my ($show, $idx) = @_;
+
+    $shows{$show}{encode}[$idx] = 1;
+    $to_encode++;
+    $total_shows++;
 }
 
 
