@@ -94,6 +94,8 @@ my $config_file = $config_dir . "/" . "myth2kodi.ini";
 # -x: overwrite existing files, and ignore done markers
 # -E: choose encoder (ffmpeg, or HandbrakeCLI)
 # -w: max width of video
+# -X: if combined with -R, delete remote recordings that have already been
+#     encoded, without re-encoding
 
 my $very_dry_run = 0;
 my $dry_run = 0;
@@ -111,6 +113,7 @@ my $use_ssh=0;
 my $myth_version;
 my $overwrite=0;
 my $max_width=-1;
+my $delete_only;
 my $encoder="HandbrakeCLI";
 my $x264_profile            = $X264_PROFILE;
 my $x264_interlaced_preset  = $X264_INTERLACED_PRESET;
@@ -118,7 +121,7 @@ my $x264_progressive_preset = $X264_PROGRESSIVE_PRESET;
 my $handbrake_audio_opts    = $HANDBRAKE_AUDIO_OPTS;
 my $handbrake_other_opts    = $HANDBRAKE_OTHER_OPTS;
 
-getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:", \%options);
+getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:X", \%options);
 
 if (defined($options{m}) && defined($options{d})) {
     die "Mutually exclusive options specified\n";
@@ -214,6 +217,10 @@ if (defined($options{u})) {
 
 if (defined($options{R})) {
     $delete_rec=1 if ($myth_server) || die "-R can only be used with -s\n";
+}
+
+if (defined($options{X})) {
+    $delete_only=1 if ($delete_rec) || die "-X can only be used in conjunction with -R\n";
 }
 
 if (defined($options{M})) {
@@ -463,11 +470,25 @@ foreach $show (keys %shows) {
                                                                             $num_entries);
 
 
+        my %recinfo;
+        $recinfo{basename}  = $basename;
+        $recinfo{chanid}    = $shows{$show}{chanid}[$j];
+        $recinfo{starttime} = $shows{$show}{start}[$j];
+        $recinfo{use_ssh}   = $use_ssh;
+
         if (-e "$status_name" && !$overwrite) {
-            #print CYAN, "[$curr_index/$total_shows, $shows_parsed/$num_entries]", RESET,
-            print CYAN, "$indices_str", RESET,
-                  BOLD, YELLOW, "\tDone marker exists, skipping \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
-        } else {
+            if (($delete_only == 1) && ($delete_rec == 1)) {
+                delete_remote_myth_recording($myth_host,
+                                             $myth_port,
+                                             $recinfo{chanid},
+                                             $recinfo{starttime}) if (!$dry_run && !$meta_only);
+                print CYAN, "$indices_str", RESET,
+                    BOLD, MAGENTA, "\tDone marker exists, deleting from myth @ $myth_host: \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
+            } else {
+                print CYAN, "$indices_str", RESET,
+                    BOLD, YELLOW, "\tDone marker exists, skipping \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
+            }
+        } elsif (!$delete_only) {
             my $action = "Encoding";
 
             if (-e "$newname") {
@@ -505,13 +526,6 @@ foreach $show (keys %shows) {
                 $x264_preset = $x264_progressive_preset;
             }
 
-
-            my %recinfo;
-            $recinfo{basename}  = $basename;
-            $recinfo{chanid}    = $shows{$show}{chanid}[$j];
-            $recinfo{starttime} = $shows{$show}{start}[$j];
-            $recinfo{use_ssh}   = $use_ssh;
-        
             if (-e "$comskip_name" && !$overwrite) {
                 print BOLD, YELLOW, "Comskip file exists, not overwriting\n", RESET if (!$very_dry_run);
             } else {
