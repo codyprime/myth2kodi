@@ -141,6 +141,7 @@ if (defined($options{c})) {
 my %config = read_config($config_file);
 
 @myth_data_dirs         = @ {$config{"storage.src_dirs"} };
+@check_dirs             = @ {$config{"storage.chk_dirs"} };
 $base                   = $config{"storage.dst_dir"};
 $myth_ssh_user          = $config{"myth-server.ssh_user"};
 $myth_ssh_key           = $config{"myth-server.ssh_key"};
@@ -426,6 +427,9 @@ foreach $show (keys %shows) {
         my $summary  = $shows{$show}{summary}[$j];
         my $airdate  = $shows{$show}{airdate}[$j];
         my $airdate_ = $airdate;
+        my $myth_season = $shows{$show}{season}[$j];
+        my $myth_number = $shows{$show}{episode}[$j];
+
         $airdate_ =~ s/-//g;
         my $nametmpl;
         my $tvdb_suffix="";
@@ -433,25 +437,37 @@ foreach $show (keys %shows) {
         $episode_sanitized =~ s/ /_/g;
         $episode_sanitized =~ s/[^A-Za-z0-9\-\._]//g;
         my $match_warning;
+        my $show_suffix;
+        my $done_exists = 0;
 
         if (${$show_season}{$episode}) {
-            $dirname = "$base/$show/Season ${$show_season}{$episode}";
+            $show_suffix = "$show/Season ${$show_season}{$episode}";
             $tvdb_suffix = sprintf(".S%02dE%02d", ${$show_season}{$episode}, ${$show_number}{$episode});
         } else {
             # This isn't fatal, we just weren't able to find any metadata on this episode.
             # Place in showname/UNKNOWN directory, with filename  'showname-airdate-episodename'
             $match_warning = "warning: no episode found on imdb for \"$episode\"\n";
-            $dirname = "$base/$show/UNKNOWN";
-            $nametmpl    = "$base/$show/UNKNOWN/$show-$episode_sanitized";
-            $status_name = "$base/$show/UNKNOWN/.$show-$episode_sanitized.done";
+            if ($myth_season && $myth_number) {
+                $show_suffix = "$show/Season $myth_season";
+                $tvdb_suffix = sprintf(".S%02dE%02d", $myth_season, $myth_number);
+            } else {
+                $show_suffix = "$show/UNKNOWN";
+            }
         }
 
-        `mkdir -p "$dirname"` if (!$very_dry_run && !$dry_run);
+        $dirname = "$base/$show_suffix";
+        $nametmpl      = sprintf("$dirname/$show-$airdate_-$episode_sanitized" . "$tvdb_suffix",
+                                 ${$show_season}{$episode}, ${$show_number}{$episode});
+        $status_suffix = sprintf(".$show-$airdate_-$episode_sanitized" . "$tvdb_suffix.done",
+                                 ${$show_season}{$episode}, ${$show_number}{$episode});
 
-        $nametmpl    = sprintf("$dirname/$show-$airdate_-$episode_sanitized" . "$tvdb_suffix",
-                               ${$show_season}{$episode}, ${$show_number}{$episode});
-        $status_name = sprintf("$dirname/.$show-$airdate_-$episode_sanitized" . "$tvdb_suffix.done",
-                               ${$show_season}{$episode}, ${$show_number}{$episode});
+        foreach my $dir (@check_dirs) {
+            if (-e "$dir/$show_suffix/$status_suffix") {
+                $done_exists = 1;
+            }
+        }
+
+        $status_name = "$dirname/$status_suffix";
 
         $newname =      $nametmpl . ".m4v";     
         $comskip_name = $nametmpl . ".txt";
@@ -476,14 +492,20 @@ foreach $show (keys %shows) {
         $recinfo{starttime} = $shows{$show}{start}[$j];
         $recinfo{use_ssh}   = $use_ssh;
 
-        if (-e "$status_name" && !$overwrite) {
+        `mkdir -p "$dirname"` if (!$very_dry_run && !$dry_run);
+
+        if ((-e "$status_name" || $done_exists) && !$overwrite) {
             if (($delete_only == 1) && ($delete_rec == 1)) {
-                delete_remote_myth_recording($myth_host,
-                                             $myth_port,
-                                             $recinfo{chanid},
-                                             $recinfo{starttime}) if (!$dry_run && !$meta_only);
-                print CYAN, "$indices_str", RESET,
-                    BOLD, MAGENTA, "\tDone marker exists, deleting from myth @ $myth_host: \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
+                if ($episode_sanitized eq "") {
+                    print RED, "Refusing to delete recording with empty episode name, out of caution\n", RESET;
+                } else {
+                    delete_remote_myth_recording($myth_host,
+                                                 $myth_port,
+                                                 $recinfo{chanid},
+                                                 $recinfo{starttime}) if (!$dry_run && !$meta_only);
+                    print CYAN, "$indices_str", RESET,
+                        BOLD, MAGENTA, "\tDone marker exists, deleting from myth @ $myth_host: \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
+                }
             } else {
                 print CYAN, "$indices_str", RESET,
                     BOLD, YELLOW, "\tDone marker exists, skipping \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
