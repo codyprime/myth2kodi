@@ -96,6 +96,8 @@ my $config_file = $config_dir . "/" . "myth2kodi.ini";
 # -w: max width of video
 # -X: if combined with -R, delete remote recordings that have already been
 #     encoded, without re-encoding
+# -k: skip encoding episodes for which there cannot be determined episode or
+#     season metadata.
 
 my $very_dry_run = 0;
 my $dry_run = 0;
@@ -114,6 +116,7 @@ my $myth_version;
 my $overwrite=0;
 my $max_width=-1;
 my $delete_only;
+my $skip_nometa=0;
 my $encoder="HandbrakeCLI";
 my $x264_profile            = $X264_PROFILE;
 my $x264_interlaced_preset  = $X264_INTERLACED_PRESET;
@@ -121,7 +124,7 @@ my $x264_progressive_preset = $X264_PROGRESSIVE_PRESET;
 my $handbrake_audio_opts    = $HANDBRAKE_AUDIO_OPTS;
 my $handbrake_other_opts    = $HANDBRAKE_OTHER_OPTS;
 
-getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:X", \%options);
+getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:Xk", \%options);
 
 if (defined($options{m}) && defined($options{d})) {
     die "Mutually exclusive options specified\n";
@@ -242,6 +245,10 @@ if (defined($options{t})) {
 
 if (defined($options{m})) {
     $meta_only = 1;
+}
+
+if (defined($options{k})) {
+    $skip_nometa=1;
 }
 
 
@@ -437,6 +444,7 @@ foreach $show (keys %shows) {
         $episode_sanitized =~ s/ /_/g;
         $episode_sanitized =~ s/[^A-Za-z0-9\-\._]//g;
         my $match_warning;
+        my $no_meta_found = 0;
         my $show_suffix;
         my $done_exists = 0;
 
@@ -451,6 +459,7 @@ foreach $show (keys %shows) {
                 $show_suffix = "$show/Season $myth_season";
                 $tvdb_suffix = sprintf(".S%02dE%02d", $myth_season, $myth_number);
             } else {
+                $no_meta_found = 1;
                 $show_suffix = "$show/UNKNOWN";
             }
         }
@@ -491,6 +500,12 @@ foreach $show (keys %shows) {
         $recinfo{chanid}    = $shows{$show}{chanid}[$j];
         $recinfo{starttime} = $shows{$show}{start}[$j];
         $recinfo{use_ssh}   = $use_ssh;
+
+
+        if ($skip_nometa && $no_meta_found) {
+                print CYAN, "$indices_str", RESET,
+                    RED, "\tNo metadata found, skipping \"$show $tvdb_suffix\", \'$episode\'\n", RESET;
+        } else {
 
         `mkdir -p "$dirname"` if (!$very_dry_run && !$dry_run);
 
@@ -636,6 +651,8 @@ foreach $show (keys %shows) {
 
             print "Encoded in $timestring (hh:mm:ss)\n", RESET if (!$title_only && !$meta_only);
     
+
+        }
 
         }
 
