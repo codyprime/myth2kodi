@@ -100,6 +100,10 @@ my $config_file = $config_dir . "/" . "myth2kodi.ini";
 #     encoded, without re-encoding
 # -k: skip encoding episodes for which there cannot be determined episode or
 #     season metadata.
+# -K: Do not skip encoding episodes for which there cannot be determined episode or
+#     season metadata. (overrides -k or .ini settings)
+# -P: prompt for unknown episodes
+# -N: Do not prompt for unknown episodes (overrides -P or .ini setting)
 
 my $very_dry_run = 0;
 my $dry_run = 0;
@@ -119,6 +123,7 @@ my $overwrite=0;
 my $max_width=-1;
 my $delete_only;
 my $skip_nometa=0;
+my $prompt_for_info=0;
 my $encoder="HandbrakeCLI";
 my $x264_profile            = $X264_PROFILE;
 my $x264_interlaced_preset  = $X264_INTERLACED_PRESET;
@@ -126,7 +131,7 @@ my $x264_progressive_preset = $X264_PROGRESSIVE_PRESET;
 my $handbrake_audio_opts    = $HANDBRAKE_AUDIO_OPTS;
 my $handbrake_other_opts    = $HANDBRAKE_OTHER_OPTS;
 
-getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:Xk", \%options);
+getopts("bdmieutsS:Rn:f:M:o:c:a:xw:E:XkKPN", \%options);
 
 if (defined($options{m}) && defined($options{d})) {
     die "Mutually exclusive options specified\n";
@@ -164,6 +169,10 @@ $x264_interlaced_preset = $config{"x264.interlaced_preset"};
 $x264_progressive_preset= $config{"x264.progressive_preset"};
 $handbrake_audio_opts   = $config{"handbrake.audio_opts"};
 $handbrake_other_opts   = $config{"handbrake.other_opts"};
+
+# other
+$skip_nometa            = $config{"other.skip_unknown"};
+$prompt_for_info        = $config{"other.prompt_unknown_info"};
 
 
 if (defined($options{S})) {
@@ -252,6 +261,18 @@ if (defined($options{m})) {
 
 if (defined($options{k})) {
     $skip_nometa=1;
+}
+
+if (defined($options{K})) {
+    $skip_nometa=0;
+}
+
+if (defined($options{P})) {
+    $prompt_for_info=1;
+}
+
+if (defined($options{N})) {
+    $prompt_for_info=0;
 }
 
 
@@ -465,8 +486,20 @@ foreach $show (keys %shows) {
                 $show_suffix = "$show/Season $myth_season";
                 $tvdb_suffix = sprintf(".S%02dE%02d", $myth_season, $myth_number);
             } else {
-                $no_meta_found = 1;
-                $show_suffix = "$show/UNKNOWN";
+                my $season_no = "";
+                my $episode_no = "";
+
+                if ($prompt_for_info) {
+                    print GREEN, "Enter episode info for: $airdate - $show - $episode\n", RESET;
+                    $season_no = prompt_text(GREEN . "Enter Season Number", "", "");
+                    $episode_no = prompt_text(GREEN . "Enter Episode Number", "", "");
+                }
+                if ($$season_no ne "" && $$episode_no ne "") {
+                    $tvdb_suffix = sprintf(".S%02dE%02d", $$season_no, $$episode_no);
+                } else {
+                    $no_meta_found = 1;
+                    $show_suffix = "$show/UNKNOWN";
+                }
             }
         }
 
@@ -1036,6 +1069,30 @@ sub prompt
     return (\$r);
 }
 
+#------------------------------------------------------------------------------
+# Simple helper function.
+#
+# Prints supplied $txt and $btxt to stdout (we will print $btxt in bold).
+#
+# @opts are the options we accept - e.g., 'y', 'n', etc.  They are
+# case-sensitive.
+#
+# $default is the default option if the user just pressed 'enter'.
+#
+# We will loop forever, reprinting the question, until we get a valid response.
+sub prompt_text
+{
+    my ($txt, $btxt, $default) = @_;
+    my $r;
+
+    print "$txt ", BOLD, "$btxt", RESET, ":  ";
+    while (not defined ($r = ReadLine(0))) { }
+    chomp $r;
+    if ($r eq "") {
+        $r = $default;
+    }
+    return (\$r);
+}
 
 #------------------------------------------------------------------------------
 # Queue a show for transcoding
