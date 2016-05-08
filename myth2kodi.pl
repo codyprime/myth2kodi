@@ -34,6 +34,8 @@ use Term::ANSIColor qw(:constants);
 use Getopt::Std;
 use Config::Simple;
 use Term::ReadKey;
+use File::Basename;
+
 use sigtrap qw(handler progress_print USR1);
 
 $Text::Wrap::columns = 72;
@@ -175,6 +177,7 @@ if (defined($options{S})) {
 
 if (defined($options{E})) {
     $encoder = $options{E};
+    print "encoder is $encoder\n";
 }
 
 if (defined($options{w})) {
@@ -437,6 +440,9 @@ foreach $show (keys %shows) {
         my $myth_season = $shows{$show}{season}[$j];
         my $myth_number = $shows{$show}{episode}[$j];
 
+        my @exts = qw(.m4v .mpg .ts .mp4 .mkv .mpeg2 .mpeg1);
+        my($base_filename, $base_dirs, $base_suffix) = fileparse($basename, @exts);
+
         $airdate_ =~ s/-//g;
         my $nametmpl;
         my $tvdb_suffix="";
@@ -478,7 +484,11 @@ foreach $show (keys %shows) {
 
         $status_name = "$dirname/$status_suffix";
 
-        $newname =      $nametmpl . ".m4v";     
+        if ($encoder eq "copy") {
+            $newname =      $nametmpl . "$base_suffix";
+        } else {
+            $newname =      $nametmpl . ".m4v";
+        }
         $comskip_name = $nametmpl . ".txt";
         $info_name =    $nametmpl . ".info";
         $error_log =    $nametmpl . ".log";
@@ -578,6 +588,7 @@ foreach $show (keys %shows) {
                         `mv "$comskip_name" "$comskip_bak"`;
                     }
 
+                    print "opening $comskip_name\n";
                     open(my $fh, '>', "$comskip_name") or die "Could not open file '$comskip_name' $!";
                     print $fh "${$comskip}";
                     close $fh;
@@ -621,8 +632,13 @@ foreach $show (keys %shows) {
 
             my $run_dry = "-1";
             $run_dry = "dry-run" if ($dry_run || $meta_only);
-            $ret = system("unbuffer nice -n 18 \"$ENCODE\" \"$filename\" \"$newname\" \\
-                          ${$interlaced} $x264_preset \"$error_log\" $run_dry $max_width $encoder") if (!$title_only && !$meta_only);
+
+            if ($encoder eq "copy") {
+                $ret = system("unbuffer nice -n 18 cp -v \"$filename\" \"$newname\"") if (!$title_only && !$meta_only);
+            } else {
+                $ret = system("unbuffer nice -n 18 \"$ENCODE\" \"$filename\" \"$newname\" \\
+                              ${$interlaced} $x264_preset \"$error_log\" $run_dry $max_width $encoder") if (!$title_only && !$meta_only);
+            }
             print "  ", RESET;
 
             if ($ret != 0) {
