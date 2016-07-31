@@ -495,6 +495,7 @@ foreach $show (keys %shows) {
                     $episode_no = prompt_text(GREEN . "Enter Episode Number", "", "");
                 }
                 if ($$season_no ne "" && $$episode_no ne "") {
+                    $show_suffix = "$show/Season $$season_no";
                     $tvdb_suffix = sprintf(".S%02dE%02d", $$season_no, $$episode_no);
                 } else {
                     $no_meta_found = 1;
